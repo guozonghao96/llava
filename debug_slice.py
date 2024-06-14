@@ -20,7 +20,7 @@ IMAGE_WIDTH      = PATCH_SIZE * PATCH_NUM_WIDTH
 IMAGE_HEIGHT     = PATCH_SIZE * PATCH_NUM_HEIGHT
 
 NEWLINE_TOKEN = 13 # '\n'
-DOT_TOKEN = 1919  #  '\,'
+DOT_TOKEN = 29892  #  ','
 def torch_extract_patches(image_tensor, patch_height, patch_width):
     """
     Utiliy function to extract patches from a given image tensor. Returns a tensor of shape (1, `patch_height`,

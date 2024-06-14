@@ -16,7 +16,7 @@ except:
 
 
 NEWLINE_TOKEN = 13
-DOT_TOKEN = 1919
+DOT_TOKEN = 29892
 
 from abc import ABC, abstractmethod
 
@@ -89,59 +89,81 @@ class adapt_LlavaMetaForCausalLM(ABC):
     def get_vision_tower(self):
         return self.get_model().get_vision_tower()
     
-    def encode_images(self, images, origin_image_widths, origin_image_heights, 
-                            slice_image_widths, slice_image_heights):
+    # def encode_images(self, images, origin_image_widths, origin_image_heights, 
+                            # slice_image_widths, slice_image_heights):
+    def encode_images(self, images, patch_images_list, ind_tokens_list):
         # image_features, abstract_w_nums, \
         #     abstract_h_nums, slice_w_nums, slice_h_nums = \
-        image_features = \
-                self.get_model().get_vision_tower()(images, origin_image_widths, 
-                                                    origin_image_heights, slice_image_widths, 
-                                                    slice_image_heights)
-        abstract_w_nums, abstract_h_nums = [w // 14 for w in origin_image_widths], [h // 14 for h in origin_image_heights]
-        slice_w_nums, slice_h_nums = [w // 14 for w in slice_image_widths], [h // 14 for h in slice_image_heights]
+        # image_features = \
+        #         self.get_model().get_vision_tower()(images, origin_image_widths, 
+        #                                             origin_image_heights, slice_image_widths, 
+        #                                             slice_image_heights)
+        abs_image_features, slice_image_features, \
+            abs_image_patch_sizes, slice_image_patch_sizes = self.get_model().get_vision_tower()(images, patch_images_list)
+        assert len(abs_image_features) == len(slice_image_features) \
+                == len(abs_image_patch_sizes) == len(slice_image_patch_sizes) \
+                == len(ind_tokens_list), "the length of abs and patches must be the same"
+        # abstract_w_nums, abstract_h_nums = [w // 14 for w in origin_image_widths], [h // 14 for h in origin_image_heights]
+        # slice_w_nums, slice_h_nums = [w // 14 for w in slice_image_widths], [h // 14 for h in slice_image_heights]
         # import pdb; pdb.set_trace()
-        if isinstance(image_features,list):
-            image_features_list = []
-            for i_slice, image_feature in enumerate(image_features):
-                # resampler_attn_mask = torch.zeros(len(abstract_w_nums), self.get_model().mm_projector.num_heads, self.get_model().mm_projector.num_queries, image_feature.shape[1]).to(device=image_feature.device, dtype=torch.float32) # bs, num_heads, num_q, num_k
-                if i_slice == len(image_features) - 1: # 处理缩略
-                    num_valid_tokens = [abs_w * abs_h for abs_w, abs_h in zip(abstract_w_nums, abstract_h_nums)]
-                    patch_w_nums = abstract_w_nums
-                    patch_h_nums = abstract_h_nums
-                else: # 处理切片
-                    num_valid_tokens = [slice_w * slice_h for slice_w, slice_h in zip(slice_w_nums, slice_h_nums)]
-                    patch_w_nums = slice_w_nums
-                    patch_h_nums = slice_h_nums
+        
+        image_features_list = []
+        for abs_image_feature, slice_image_feature, abs_image_patch_size, slice_image_patch_size, ind_tokens in \
+            zip(abs_image_features, slice_image_features, abs_image_patch_sizes, slice_image_patch_sizes, ind_tokens_list):
+            abs_resampled_feature = self.get_model().mm_projector(abs_image_feature, tgt_size=abs_image_patch_size)
+            slice_resampled_feature = self.get_model().mm_projector(slice_image_feature, tgt_size=slice_image_patch_size)
+            if len(ind_tokens) == 0: # 没有切片
+                resampled_image_features = torch.cat([slice_resampled_feature[0:0], abs_resampled_feature], dim=0)
+            else: # 有切片
+                resampled_image_features = torch.cat([slice_resampled_feature, abs_resampled_feature], dim=0)
+            image_features_list.append(resampled_image_features)
+        return image_features_list
 
-                # for i, num in enumerate(num_valid_tokens):
-                #     resampler_attn_mask[i][:, :, num:] = float('-inf')
-                # resampler_attn_mask = resampler_attn_mask.reshape(-1, self.get_model().mm_projector.num_queries, image_feature.shape[1]).to(image_feature.dtype)
-                # image_features_list.append(self.get_model().mm_projector(image_feature, attn_mask=resampler_attn_mask))
-                # resampled_features = self.get_model().mm_projector(image_feature)
-                # import pdb; pdb.set_trace()
-                resampled_features = []
-                for feature, valid_num, patch_h, patch_w in zip(image_feature, num_valid_tokens, patch_h_nums, patch_w_nums):
-                    # print(feature.shape, valid_num, patch_h, patch_w)
-                    # import pdb; pdb.set_trace()
-                    resampled_feature = self.get_model().mm_projector(feature[:valid_num][None], tgt_size=(patch_h, patch_w))
-                    resampled_features.append(resampled_feature)
-                resampled_features = torch.cat(resampled_features, dim=0)
-                image_features_list.append(resampled_features)
+        # if isinstance(image_features,list):
+        #     image_features_list = []
+        #     for i_slice, image_feature in enumerate(image_features):
+        #         # resampler_attn_mask = torch.zeros(len(abstract_w_nums), self.get_model().mm_projector.num_heads, self.get_model().mm_projector.num_queries, image_feature.shape[1]).to(device=image_feature.device, dtype=torch.float32) # bs, num_heads, num_q, num_k
+        #         if i_slice == len(image_features) - 1: # 处理缩略
+        #             num_valid_tokens = [abs_w * abs_h for abs_w, abs_h in zip(abstract_w_nums, abstract_h_nums)]
+        #             patch_w_nums = abstract_w_nums
+        #             patch_h_nums = abstract_h_nums
+        #         else: # 处理切片
+        #             num_valid_tokens = [slice_w * slice_h for slice_w, slice_h in zip(slice_w_nums, slice_h_nums)]
+        #             patch_w_nums = slice_w_nums
+        #             patch_h_nums = slice_h_nums
 
-            image_features = torch.concat(tuple(image_features_list), dim=1)
-        else:
-            image_features = self.get_model().mm_projector(image_features)
+        #         # for i, num in enumerate(num_valid_tokens):
+        #         #     resampler_attn_mask[i][:, :, num:] = float('-inf')
+        #         # resampler_attn_mask = resampler_attn_mask.reshape(-1, self.get_model().mm_projector.num_queries, image_feature.shape[1]).to(image_feature.dtype)
+        #         # image_features_list.append(self.get_model().mm_projector(image_feature, attn_mask=resampler_attn_mask))
+        #         # resampled_features = self.get_model().mm_projector(image_feature)
+        #         # import pdb; pdb.set_trace()
+        #         resampled_features = []
+        #         for feature, valid_num, patch_h, patch_w in zip(image_feature, num_valid_tokens, patch_h_nums, patch_w_nums):
+        #             # print(feature.shape, valid_num, patch_h, patch_w)
+        #             # import pdb; pdb.set_trace()
+        #             resampled_feature = self.get_model().mm_projector(feature[:valid_num][None], tgt_size=(patch_h, patch_w))
+        #             resampled_features.append(resampled_feature)
+        #         resampled_features = torch.cat(resampled_features, dim=0)
+        #         image_features_list.append(resampled_features)
+
+        #     image_features = torch.concat(tuple(image_features_list), dim=1)
+        # else:
+        #     image_features = self.get_model().mm_projector(image_features)
             
-        return image_features
+        # return image_features
 
     def prepare_inputs_labels_for_multimodal(
         self, input_ids, position_ids, attention_mask, past_key_values, labels, 
-        images, origin_image_widths, origin_image_heights, slice_image_widths, slice_image_heights, 
-        num_images_list, ind_tokens
+        images, 
+        # origin_image_widths, origin_image_heights, slice_image_widths, slice_image_heights, num_images_list, 
+        patch_images_list,
+        ind_tokens_list
     ):
         # import pdb; pdb.set_trace()
         vision_tower = self.get_vision_tower()
         if vision_tower is None or images is None or input_ids.shape[1] == 1:
+            assert False
             if past_key_values is not None and vision_tower is not None and images is not None and input_ids.shape[1] == 1:
                 target_shape = past_key_values[-1][-1].shape[-2] + 1
                 attention_mask = torch.cat((attention_mask, torch.ones(
@@ -153,8 +175,9 @@ class adapt_LlavaMetaForCausalLM(ABC):
             return input_ids, position_ids, attention_mask, past_key_values, None, labels
 
         # import pdb; pdb.set_trace()
-        image_features = self.encode_images(images, origin_image_widths, origin_image_heights, 
-                                            slice_image_widths, slice_image_heights).to(self.device)
+        # image_features = self.encode_images(images, origin_image_widths, origin_image_heights, 
+        #                                     slice_image_widths, slice_image_heights).to(self.device)
+        image_features = self.encode_images(images, patch_images_list, ind_tokens_list) #.to(self.device)
 
         # import pdb; pdb.set_trace()
         # TODO: image start / end is not implemented here to support pretraining.
@@ -187,6 +210,16 @@ class adapt_LlavaMetaForCausalLM(ABC):
         for batch_idx, cur_input_ids in enumerate(input_ids):
             # import pdb
             num_images = (cur_input_ids == IMAGE_TOKEN_INDEX).sum()
+            
+            # print(num_images_list, cur_image_idx, num_images, input_ids)
+            if num_images == 0:
+                cur_image_features = image_features[cur_image_idx]
+                cur_input_embeds_1 = self.get_model().embed_tokens(cur_input_ids)
+                cur_input_embeds = torch.cat([cur_input_embeds_1, cur_image_features[0:0]], dim=0)
+                new_input_embeds.append(cur_input_embeds)
+                new_labels.append(labels[batch_idx])
+                cur_image_idx += 1
+                continue
 
             image_token_indices = [-1] + torch.where(cur_input_ids == IMAGE_TOKEN_INDEX)[0].tolist() + [cur_input_ids.shape[0]]
             cur_input_ids_noim = []
@@ -203,70 +236,87 @@ class adapt_LlavaMetaForCausalLM(ABC):
 
             cur_new_input_embeds = []
             cur_new_labels = []
-            
-            # print(num_images_list, cur_image_idx, num_images, input_ids)
-            if num_images == 0:
-                cur_image_features = image_features[cur_image_idx]
-                cur_input_embeds_1 = self.get_model().embed_tokens(cur_input_ids)
-                cur_input_embeds = torch.cat([cur_input_embeds_1, cur_image_features[0:0]], dim=0)
-                new_input_embeds.append(cur_input_embeds)
-                new_labels.append(labels[batch_idx])
-                cur_image_idx += 1
-                continue
 
             # print(num_images_list, cur_image_idx, num_images, input_ids)
             for i in range(num_images + 1):
                 cur_new_input_embeds.append(cur_input_embeds_no_im[i])
                 cur_new_labels.append(cur_labels_noim[i])
                 if i < num_images:
-
-                    # import pdb; pdb.set_trace()
-                    num_slices = num_images_list[cur_image_idx] # 包括切片+原图 （>1 为切片+原图数量， ==1为原图）
-                    cur_image_features = image_features[cur_image_idx]
-                    cur_ind_tokens = ind_tokens[cur_image_idx] # ind_token 切片数量 == num_slices - 1，如果无切片，这个list=[]
+                    cur_ind_tokens = ind_tokens_list[cur_image_idx]
+                    cur_image_features = image_features[cur_image_idx] #n, 64, c
                     cur_image_idx += 1
+                    num_slices = len(cur_ind_tokens)
+                    assert num_slices+1 == cur_image_features.shape[0]
                     
-                    num_slice_ind_tokens = int((torch.as_tensor(cur_ind_tokens) != 0).sum())
-                    assert num_slice_ind_tokens == (num_slices - 1)
-                    # 特征切片
-                    cur_image_features = cur_image_features[-num_slices * self.get_model().mm_projector.num_queries:]
-                    cur_all_slice_image_features = cur_image_features.chunk(chunks=num_slices, dim=0)
-                    cur_abs_image_features = cur_all_slice_image_features[-1]
-                    cur_slice_image_features = cur_all_slice_image_features[:-1]
+                    cur_abs_image_features = cur_image_features[-1]
+                    cur_slice_image_features = cur_image_features[:-1]
 
-                    # ind_token切片
-                    cur_ind_tokens_embeds = self.get_model().embed_tokens(
-                                torch.as_tensor(cur_ind_tokens,  # \n , -> 13, 1919
-                                                dtype=torch.long, 
-                                                device=image_features.device)).detach()
-                    cur_ind_tokens_embeds = cur_ind_tokens_embeds[-num_slice_ind_tokens:]
-
-                    if len(cur_slice_image_features) == 0: # 只有一个图被切出来
+                    if num_slices == 0: #没有切片
                         cur_image_features = cur_abs_image_features
-                        # print(cur_image_features.shape, cur_ind_tokens_embeds.shape, len(cur_slice_image_features), 
-                        #       len(cur_all_slice_image_features), num_slices)
                     else:
+                        # ind_token切片
+                        cur_ind_tokens_embeds = self.get_model().embed_tokens(
+                                    torch.as_tensor(cur_ind_tokens,  # \n , -> 13, 1919
+                                                    dtype=torch.long, 
+                                                    device=cur_image_features.device)).detach()
+                        # concat slice+ind tokens
                         temp_cur_image_features = []
                         for slice_image_features, ind_token_embeds in zip(cur_slice_image_features, cur_ind_tokens_embeds):
-                            # import pdb; pdb.set_trace()
                             slice_image_features = torch.cat([slice_image_features, ind_token_embeds[None]], dim=0)
                             temp_cur_image_features.append(slice_image_features)
-                        # for slice_image_features in cur_slice_image_features:
-                        #     temp_cur_image_features.append(slice_image_features)
                         temp_cur_image_features.append(cur_abs_image_features)
                         cur_image_features = torch.cat(temp_cur_image_features, dim=0)
-                        # print(cur_image_features.shape, cur_ind_tokens_embeds.shape, len(cur_slice_image_features), 
-                        #       len(cur_all_slice_image_features), num_slices)
+
                     cur_new_input_embeds.append(cur_image_features)
                     cur_new_labels.append(torch.full((cur_image_features.shape[0],), 
                                                      IGNORE_INDEX, device=cur_labels.device, dtype=cur_labels.dtype))
+                    
+                    # # import pdb; pdb.set_trace()
+                    # num_slices = num_images_list[cur_image_idx] # 包括切片+原图 （>1 为切片+原图数量， ==1为原图）
+                    # cur_image_features = image_features[cur_image_idx]
+                    # cur_ind_tokens = ind_tokens[cur_image_idx] # ind_token 切片数量 == num_slices - 1，如果无切片，这个list=[]
+                    # cur_image_idx += 1
+                    
+                    # num_slice_ind_tokens = int((torch.as_tensor(cur_ind_tokens) != 0).sum())
+                    # assert num_slice_ind_tokens == (num_slices - 1)
+                    # # 特征切片
+                    # cur_image_features = cur_image_features[-num_slices * self.get_model().mm_projector.num_queries:]
+                    # cur_all_slice_image_features = cur_image_features.chunk(chunks=num_slices, dim=0)
+                    # cur_abs_image_features = cur_all_slice_image_features[-1]
+                    # cur_slice_image_features = cur_all_slice_image_features[:-1]
 
+                    # # ind_token切片
+                    # cur_ind_tokens_embeds = self.get_model().embed_tokens(
+                    #             torch.as_tensor(cur_ind_tokens,  # \n , -> 13, 1919
+                    #                             dtype=torch.long, 
+                    #                             device=image_features.device)).detach()
+                    # cur_ind_tokens_embeds = cur_ind_tokens_embeds[-num_slice_ind_tokens:]
+
+                    # if len(cur_slice_image_features) == 0: # 只有一个图被切出来
+                    #     cur_image_features = cur_abs_image_features
+                    #     # print(cur_image_features.shape, cur_ind_tokens_embeds.shape, len(cur_slice_image_features), 
+                    #     #       len(cur_all_slice_image_features), num_slices)
+                    # else:
+                    #     temp_cur_image_features = []
+                    #     for slice_image_features, ind_token_embeds in zip(cur_slice_image_features, cur_ind_tokens_embeds):
+                    #         # import pdb; pdb.set_trace()
+                    #         slice_image_features = torch.cat([slice_image_features, ind_token_embeds[None]], dim=0)
+                    #         temp_cur_image_features.append(slice_image_features)
+                    #     # for slice_image_features in cur_slice_image_features:
+                    #     #     temp_cur_image_features.append(slice_image_features)
+                    #     temp_cur_image_features.append(cur_abs_image_features)
+                    #     cur_image_features = torch.cat(temp_cur_image_features, dim=0)
+                    #     # print(cur_image_features.shape, cur_ind_tokens_embeds.shape, len(cur_slice_image_features), 
+                    #     #       len(cur_all_slice_image_features), num_slices)
+                    # cur_new_input_embeds.append(cur_image_features)
+                    # cur_new_labels.append(torch.full((cur_image_features.shape[0],), 
+                    #                                  IGNORE_INDEX, device=cur_labels.device, dtype=cur_labels.dtype))
             cur_new_input_embeds = torch.cat(cur_new_input_embeds)
             cur_new_labels = torch.cat(cur_new_labels)
 
             new_input_embeds.append(cur_new_input_embeds)
             new_labels.append(cur_new_labels)
-
+        
         tokenizer_model_max_length = getattr(self.config, 'tokenizer_model_max_length', None)
         tokenizer_model_max_length = 4096
 
@@ -403,13 +453,14 @@ class adapt_LlavaLlamaForCausalLM(LlamaForCausalLM, adapt_LlavaMetaForCausalLM):
         output_attentions: Optional[bool] = None,
         output_hidden_states: Optional[bool] = None,
         images: Optional[torch.FloatTensor] = None,
-        origin_image_widths=None,
-        origin_image_heights=None,
-        slice_image_widths=None,
-        slice_image_heights=None,
-        num_images_list=None,
-        ind_tokens=None,
+        # origin_image_widths=None,
+        # origin_image_heights=None,
+        # slice_image_widths=None,
+        # slice_image_heights=None,
+        # num_images_list=None,
         image_sizes=None, # no use
+        patch_images_list=None,
+        ind_tokens_list=None,
         return_dict: Optional[bool] = None,
     ) -> Union[Tuple, CausalLMOutputWithPast]:
 
@@ -428,12 +479,13 @@ class adapt_LlavaLlamaForCausalLM(LlamaForCausalLM, adapt_LlavaMetaForCausalLM):
                 past_key_values,
                 labels,
                 images,
-                origin_image_widths,
-                origin_image_heights,
-                slice_image_widths,
-                slice_image_heights,
-                num_images_list,
-                ind_tokens
+                # origin_image_widths,
+                # origin_image_heights,
+                # slice_image_widths,
+                # slice_image_heights,
+                # num_images_list,
+                patch_images_list,
+                ind_tokens_list
             )
 
         return super().forward(

@@ -20,7 +20,7 @@ IMAGE_WIDTH      = PATCH_SIZE * PATCH_NUM_WIDTH
 IMAGE_HEIGHT     = PATCH_SIZE * PATCH_NUM_HEIGHT
 
 NEWLINE_TOKEN = 13 # '\n'
-DOT_TOKEN = 1919  #  '\,'
+DOT_TOKEN = 29892  #  ','
 def torch_extract_patches(image_tensor, patch_height, patch_width):
     """
     Utiliy function to extract patches from a given image tensor. Returns a tensor of shape (1, `patch_height`,
@@ -458,8 +458,26 @@ def slice_image_minicpm(
 
         refine_image = image.resize(refine_size, Image.Resampling.BICUBIC)
         patches = split_to_patches(refine_image, best_grid)
+    
+    ind_tokens = []
+    if best_grid is None:
+        return source_image, patches, best_grid, ind_tokens
+    else:
+        # flatten the patches
+        patches = [item for sublist in patches for item in sublist]
+        # calculate ind_token layout
+        for j in range(best_grid[1]):
+            for i in range(best_grid[0]):
+                if i != best_grid[0] - 1:
+                    ind_tokens.append(DOT_TOKEN)
+                else:
+                    ind_tokens.append(NEWLINE_TOKEN)
 
-    return source_image, patches, best_grid
+        return source_image, patches, best_grid, ind_tokens
+    # source_image: reshape的pil原图
+    # patches: 如果没有split，patches=[]，否则为二维list按best grid排列
+    # best: 如果有切片，best grid为切片布局如2x3，否则为None
+    # ind_token, 有切片就是,和\n的排序。没切片就是空[]
 
 
 # # # img = Image.open("/home/xuruyi/myLLaVa/883700e3366b775c93315373510e7e7.png")
@@ -482,61 +500,21 @@ def slice_image_minicpm(
 #                                      do_rescale=True,
 #                                      do_normalize=True,
 #                                      return_tensors='pt')['pixel_values']
+# to_pil = ToPILImage()
+# im_ = to_pil(image_1)
+# im_.save(f'{img_name}_norm.png')
 # # import pdb; pdb.set_trace()
 # # exit()
 
 # print(img.size)
 # print(img_np.shape)
-# re_size = (336, 720)
+# # re_size = (672, 1008)
 # # re_size = (336 * 2, 1008)
-# # re_size = (336, 336)
+# re_size = (672, 336)
 # img = img.resize(re_size)
 # img.save('./' + img_name.split('.')[0] + '_' + str(re_size[0]) + '_' + str(re_size[1]) + '_.' + img_name.split('.')[1])
 
-# images, ind_tokens = process_image(img, ori_image=True)
-# print(ind_tokens, len(ind_tokens), len(images))
-# for i in range(len(images)):
-#     img_ = images[i]
-#     to_pil = ToPILImage()
-#     img_ = to_pil(img_)
-#     print(img_.size)
-#     img_.save(f"{img_name.split('.')[0]}_{i}.png")
-
-
-# images, ind_tokens, abs_width, abs_height, slice_width, slice_height = process_image_(img)
-# print([im.size for im in images], ind_tokens, abs_width, abs_height, slice_width, slice_height)
-# # xx = image_processor.preprocess(images, return_tensors='pt')['pixel_values']
-# # print(xx.shape)
-
-# # for i in range(len(xx)):
-#     # img_ = xx[i]
-#     # to_pil = ToPILImage()
-#     # img_ = to_pil(img_)
-
-# for i in range(len(images)):
-#     img_ = images[i]
-#     # 变成原来的图像
-#     print(np.array(img_).shape) # h, w, 3
-#     img_np_ = np.array(img_).reshape(24, 14, 24, 14, 3).transpose(0, 2, 1, 3, 4).reshape(-1, 14*14*3)
-#     # patches = torch.nn.functional.unfold(image_tensor, (patch_height, patch_width), stride=(patch_height, patch_width)) # 1, 14*14*3, ph*pw
-#     # patches = patches.reshape(image_tensor.size(0), image_tensor.size(1), patch_height, patch_width, -1) # 1,3,14,14,ph*pw->1,ph*pw,14,14,3
-#     # patches = patches.permute(0, 4, 2, 3, 1).reshape( # 1,phxpw,14,14,3
-#     #     image_tensor.size(2) // patch_height, 
-#     #     image_tensor.size(3) // patch_width,
-#     #     image_tensor.size(1) * patch_height * patch_width,
-#     # )
-
-
-#     if i == len(images) - 1:
-#         img_np_ = img_np_[:abs_width*abs_height//14//14].reshape(abs_height//14, abs_width //14, 14, 14, 3).transpose(0, 2, 1, 3, 4).reshape(abs_height, abs_width, 3) #.transpose(1, 0, 2)
-#     else:
-#         img_np_ = img_np_[:slice_width*slice_height//14//14].reshape(slice_height//14,slice_width //14, 14, 14, 3).transpose(0, 2, 1, 3, 4).reshape(slice_height, slice_width, 3) #.transpose(1, 0, 2)
-#     img_ = Image.fromarray(img_np_)
-#     # 变成原来图像
-
-#     print(img_.size)
-
-#     img_.save(f"my_{img_name.split('.')[0]}_{i}.png")
+# # images, ind_tokens = process_image(img, ori_image=True)
 # # print(ind_tokens, len(ind_tokens), len(images))
 # # for i in range(len(images)):
 # #     img_ = images[i]
@@ -546,10 +524,65 @@ def slice_image_minicpm(
 # #     img_.save(f"{img_name.split('.')[0]}_{i}.png")
 
 
-# source_image, patches, best_grid = \
+# # images, ind_tokens, abs_width, abs_height, slice_width, slice_height = process_image_(img)
+# # print([im.size for im in images], ind_tokens, abs_width, abs_height, slice_width, slice_height)
+# # # xx = image_processor.preprocess(images, return_tensors='pt')['pixel_values']
+# # # print(xx.shape)
+
+# # # for i in range(len(xx)):
+# #     # img_ = xx[i]
+# #     # to_pil = ToPILImage()
+# #     # img_ = to_pil(img_)
+
+# # for i in range(len(images)):
+# #     img_ = images[i]
+# #     # 变成原来的图像
+# #     print(np.array(img_).shape) # h, w, 3
+# #     img_np_ = np.array(img_).reshape(24, 14, 24, 14, 3).transpose(0, 2, 1, 3, 4).reshape(-1, 14*14*3)
+# #     # patches = torch.nn.functional.unfold(image_tensor, (patch_height, patch_width), stride=(patch_height, patch_width)) # 1, 14*14*3, ph*pw
+# #     # patches = patches.reshape(image_tensor.size(0), image_tensor.size(1), patch_height, patch_width, -1) # 1,3,14,14,ph*pw->1,ph*pw,14,14,3
+# #     # patches = patches.permute(0, 4, 2, 3, 1).reshape( # 1,phxpw,14,14,3
+# #     #     image_tensor.size(2) // patch_height, 
+# #     #     image_tensor.size(3) // patch_width,
+# #     #     image_tensor.size(1) * patch_height * patch_width,
+# #     # )
+
+
+# #     if i == len(images) - 1:
+# #         img_np_ = img_np_[:abs_width*abs_height//14//14].reshape(abs_height//14, abs_width //14, 14, 14, 3).transpose(0, 2, 1, 3, 4).reshape(abs_height, abs_width, 3) #.transpose(1, 0, 2)
+# #     else:
+# #         img_np_ = img_np_[:slice_width*slice_height//14//14].reshape(slice_height//14,slice_width //14, 14, 14, 3).transpose(0, 2, 1, 3, 4).reshape(slice_height, slice_width, 3) #.transpose(1, 0, 2)
+# #     img_ = Image.fromarray(img_np_)
+# #     # 变成原来图像
+
+# #     print(img_.size)
+
+# #     img_.save(f"my_{img_name.split('.')[0]}_{i}.png")
+# # # print(ind_tokens, len(ind_tokens), len(images))
+# # # for i in range(len(images)):
+# # #     img_ = images[i]
+# # #     to_pil = ToPILImage()
+# # #     img_ = to_pil(img_)
+# # #     print(img_.size)
+# # #     img_.save(f"{img_name.split('.')[0]}_{i}.png")
+
+
+# source_image, patches, best_grid, ind_tokens = \
 #     slice_image_minicpm(image=img, max_slice_nums=6, scale_resolution=336, patch_size=14, never_split=False)
-# print(source_image, patches, best_grid)
-# patches = [item for sublist in patches for item in sublist]
+# print(source_image, patches, best_grid, ind_tokens)
+# # patches = [item for sublist in patches for item in sublist]
+
+# if len(patches) != 0:
+#     xx = image_processor.preprocess(source_image, do_resize=False, 
+#                                         do_center_crop=False,
+#                                         do_rescale=True,
+#                                         do_normalize=True,
+#                                         return_tensors='pt')['pixel_values']
+#     for i, x in enumerate(xx):
+#         to_pil = ToPILImage()
+#         img_ = to_pil(x)
+#         img_.save(f"mini_post_{img_name.split('.')[0]}_{i}.png")
+
 # for i, p in enumerate(patches):
 #     p.save(f"mini_{img_name.split('.')[0]}_{i}.png")
 

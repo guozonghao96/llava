@@ -15,12 +15,13 @@ OUTPUT_DIR=./checkpoints_new/llava-lora_debug #
 # PRBATCH=32
 # gradient_accumulation_steps=1
 
+    # --lora_enable True --lora_r 128 --lora_alpha 256 --mm_projector_lr 2e-5 \
+    
 deepspeed \
     --master_port=12322 \
-    --include localhost:5 \
+    --include localhost:0 \
     llava/train/llava_uhd/train_mem.py \
     --deepspeed ./scripts/zero2.json \
-    --lora_enable True --lora_r 128 --lora_alpha 256 --mm_projector_lr 2e-5 \
     --model_name_or_path /home/guozonghao/pretrained_models/vicuna-13b-v1.5 \
     --version plain \
     --data_path ./playground/data/LLaVA-Pretrain/blip_laion_cc_sbu_558k.json \

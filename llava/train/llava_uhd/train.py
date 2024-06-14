@@ -22,12 +22,6 @@ import logging
 import pathlib
 from typing import Dict, Optional, Sequence, List
 
-import math
-
-from PIL import Image
-
-from torchvision.transforms import Compose,ToTensor
-
 import torch
 
 import transformers
@@ -44,7 +38,7 @@ from PIL import Image
 
 from adapt_llava import adapt_LlavaLlamaForCausalLM
 
-from slice_logic import process_image, process_image_
+from slice_logic import process_image, process_image_, slice_image_minicpm
 
 local_rank = None
 
@@ -685,20 +679,35 @@ class LazySupervisedDataset(Dataset):
                 image_file = self.list_data_dict[i]['image']
                 image_folder = self.data_args.image_folder
                 processor = self.data_args.image_processor
-                
+                crop_size = processor.crop_size
+
                 image = Image.open(os.path.join(image_folder, image_file)).convert('RGB')
+                source_image, patches, best_grid, ind_tokens = slice_image_minicpm(
+                    image, max_slice_nums=MAX_SLICES_IMAGES-1, scale_resolution=336, patch_size=14, never_split=False)
+                if best_grid is None: #说明没有切片
+                    patch_tensors = torch.zeros(1, 3, crop_size['height'], crop_size['width'])
+                    source_tensors = processor.preprocess(source_image, do_resize=False, do_center_crop=False, 
+                                                            do_rescale=True, do_normalize=True, 
+                                                            return_tensors='pt')['pixel_values'] # 1, 3, abs_h, abs_w
+                else:
+                    patch_tensors = processor.preprocess(patches, do_resize=False, do_center_crop=False, 
+                                                            do_rescale=True, do_normalize=True, 
+                                                            return_tensors='pt')['pixel_values'] # num_slice, 3, s_h, s_w
+                    source_tensors = processor.preprocess(source_image, do_resize=False, do_center_crop=False, 
+                                                            do_rescale=True, do_normalize=True, 
+                                                            return_tensors='pt')['pixel_values'] # 1, 3, abs_h, abs_w
+                image_tensor = source_tensors[0]
                 # origin_image_width  = image.size[0]
                 # origin_image_height = image.size[1]
-                
                 # slices_and_image, ind_tokens = process_image(image, fix_size=self.data_args.fix_size)
-                slices_and_image, ind_tokens, abs_width, abs_height, slice_width, slice_height = process_image_(image)
-                slices_and_image = processor.preprocess(slices_and_image, return_tensors='pt')['pixel_values']
-                image_tensor = slices_and_image.flatten(0, 1)
-                if image_tensor.shape[0] > MAX_SLICES_IMAGES * 3: # 最大接收9张slice，为3*3的图，
-                                                # 在zero3的时候，得保证每个clip输入的batch size一样！
-                    print('this image is much than 9 slice(3x3), should pass')
-                    assert False
+                # slices_and_image, ind_tokens, abs_width, abs_height, slice_width, slice_height = process_image_(image)
+                # slices_and_image = processor.preprocess(slices_and_image, return_tensors='pt')['pixel_values']
+                # image_tensor = slices_and_image.flatten(0, 1)
 
+                if patch_tensors.shape[0] + 1 > MAX_SLICES_IMAGES: # 最大接收9张slice，为3*3的图，
+                                                # 在zero3的时候，得保证每个clip输入的batch size一样！
+                    print(f'this image is much than {MAX_SLICES_IMAGES} slice, should pass')
+                    assert False
                 sources = preprocess_multimodal(
                     copy.deepcopy([e["conversations"] for e in sources]),
                     self.data_args)
@@ -716,26 +725,26 @@ class LazySupervisedDataset(Dataset):
             # image exist in the data
             if 'image' in self.list_data_dict[i]:
                 data_dict['image'] = image_tensor
-                data_dict['origin_image_width'] = abs_width
-                data_dict['origin_image_height'] = abs_height
-                data_dict['slice_image_width'] = slice_width
-                data_dict['slice_image_height'] = slice_height
-                data_dict['num_images'] = len(image_tensor) // 3
+                data_dict['patch_images'] = patch_tensors
                 data_dict['ind_tokens'] = ind_tokens
+                # data_dict['origin_image_width'] = abs_width
+                # data_dict['origin_image_height'] = abs_height
+                # data_dict['slice_image_width'] = slice_width
+                # data_dict['slice_image_height'] = slice_height
+                # data_dict['num_images'] = len(image_tensor) // 3
                 
             elif self.data_args.is_multimodal:
                 crop_size = self.data_args.image_processor.crop_size
-                
                 image = torch.zeros(3, crop_size['height'], crop_size['width'])
-                
+                patch_tensors = torch.zeros(1, 3, crop_size['height'], crop_size['width'])
                 data_dict['image'] = image
-                data_dict['origin_image_width'] = 336
-                data_dict['origin_image_height'] = 336
-                data_dict['slice_image_width'] = 336
-                data_dict['slice_image_height'] = 336
-                data_dict['num_images'] = 1
+                data_dict['patch_images'] = patch_tensors
                 data_dict['ind_tokens'] = []
-
+                # data_dict['origin_image_width'] = 336
+                # data_dict['origin_image_height'] = 336
+                # data_dict['slice_image_width'] = 336
+                # data_dict['slice_image_height'] = 336
+                # data_dict['num_images'] = 1
             return data_dict
         except:
             print('this iter is wrong in something... skip...')
@@ -765,26 +774,19 @@ class DataCollatorForSupervisedDataset(object):
             attention_mask=input_ids.ne(self.tokenizer.pad_token_id),
         )
         if 'ind_tokens' in instances[0]:
-            ind_tokens = [(MAX_SLICES_IMAGES - len(instance['ind_tokens'])) * [0] +  instance['ind_tokens'] for instance in instances]
-            batch['ind_tokens'] = ind_tokens
-
-        if 'num_images' in instances[0]:
-            num_images = [instance['num_images'] for instance in instances]
-            batch['num_images_list'] = num_images
-
-        if 'origin_image_width' in instances[0]:
-            origin_image_widths = [instance['origin_image_width'] for instance in instances]
-            origin_image_heights = [instance['origin_image_height'] for instance in instances]
-            batch['origin_image_widths'] = origin_image_widths
-            batch['origin_image_heights'] = origin_image_heights
-
-        if 'slice_image_width' in instances[0]:
-            slice_image_widths = [instance['slice_image_width'] for instance in instances]
-            slice_image_heights = [instance['slice_image_height'] for instance in instances]
-            batch['slice_image_widths'] = slice_image_widths
-            batch['slice_image_heights'] = slice_image_heights
-
+            # ind_tokens = [(MAX_SLICES_IMAGES - len(instance['ind_tokens'])) * [0] +  instance['ind_tokens'] for instance in instances]
+            batch['ind_tokens_list'] = [instance['ind_tokens'] for instance in instances]
+        if 'patch_images' in instances[0]:
+            batch['patch_images_list'] = [instance['patch_images'] for instance in instances]
         if 'image' in instances[0]:
+            images = [instance['image'] for instance in instances]
+            batch['images'] = images
+
+            # if all(x is not None and x.shape == images[0].shape for x in images):
+            #     batch['images'] = torch.stack(images)
+            # else:
+            #     batch['images'] = images
+
             # images = [instance['image'] for instance in instances]
             # batch['images'] = images
             # if all(x is not None and x.shape == images[0].shape for x in images):
@@ -800,15 +802,33 @@ class DataCollatorForSupervisedDataset(object):
 
             #     batch['images'] = torch.stack(padded_x_tensors)
 
-            images = [instance['image'] for instance in instances]
-            max_of_x = MAX_SLICES_IMAGES * 3
-            padded_x_tensors = []
-            for x in images:
-                padding = torch.zeros(max_of_x - x.size(0), x.size(1), x.size(2), dtype=x.dtype)
-                # 在第一个维度上堆叠填充
-                padded_x_tensor = torch.cat((padding, x), dim=0)
-                padded_x_tensors.append(padded_x_tensor)
-            batch['images'] = torch.stack(padded_x_tensors)
+
+            # images = [instance['image'] for instance in instances]
+            # max_of_x = MAX_SLICES_IMAGES * 3
+            # padded_x_tensors = []
+            # for x in images:
+            #     padding = torch.zeros(max_of_x - x.size(0), x.size(1), x.size(2), dtype=x.dtype)
+            #     # 在第一个维度上堆叠填充
+            #     padded_x_tensor = torch.cat((padding, x), dim=0)
+            #     padded_x_tensors.append(padded_x_tensor)
+            # batch['images'] = torch.stack(padded_x_tensors)
+
+        # if 'num_images' in instances[0]:
+        #     num_images = [instance['num_images'] for instance in instances]
+        #     batch['num_images_list'] = num_images
+
+        # if 'origin_image_width' in instances[0]:
+        #     origin_image_widths = [instance['origin_image_width'] for instance in instances]
+        #     origin_image_heights = [instance['origin_image_height'] for instance in instances]
+        #     batch['origin_image_widths'] = origin_image_widths
+        #     batch['origin_image_heights'] = origin_image_heights
+
+        # if 'slice_image_width' in instances[0]:
+        #     slice_image_widths = [instance['slice_image_width'] for instance in instances]
+        #     slice_image_heights = [instance['slice_image_height'] for instance in instances]
+        #     batch['slice_image_widths'] = slice_image_widths
+        #     batch['slice_image_heights'] = slice_image_heights
+
         return batch
 
 def make_supervised_data_module(tokenizer: transformers.PreTrainedTokenizer,
@@ -985,7 +1005,6 @@ def train():
         training_args.use_im_start_end = model_args.mm_use_im_start_end
         model.config.mm_use_im_patch_token = model_args.mm_use_im_patch_token
         model.initialize_vision_tokenizer(model_args, tokenizer=tokenizer)
-
 
     if training_args.bits in [4, 8]:
         from peft.tuners.lora import LoraLayer
