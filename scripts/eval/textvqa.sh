@@ -1,7 +1,7 @@
 #!/bin/bash
 
 python -m llava.train.llava_uhd.model_vqa_loader_uhd \
-    --model-path ./checkpoints_new/llava-uhd_adapt_1 \
+    --model-path ./checkpoints_new/llava-uhd-v1.5 \
     --question-file ./playground/data/eval/textvqa/llava_textvqa_val_v051_ocr.jsonl \
     --image-folder ./playground/data/eval/textvqa/train_images \
     --answers-file ./playground/data/eval/textvqa/answers/llava-v1.5-13b.jsonl \

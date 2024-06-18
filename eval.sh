@@ -5,8 +5,8 @@
 # # gqa
 # CUDA_VISIBLE_DEVICES=1 bash scripts/eval/gqa.sh
 # CUDA_VISIBLE_DEVICES=3,4,5,6,7 bash scripts/eval/gqa.sh
-CUDA_VISIBLE_DEVICES=0,1,2,3,4,5,6,7 bash scripts/eval/gqa.sh
-echo 'gqa'
+# CUDA_VISIBLE_DEVICES=0,1,2,3,4,5,6,7 bash scripts/eval/gqa.sh
+# echo 'gqa'
 
 # CUDA_VISIBLE_DEVICES=0 bash scripts/eval/vizwiz.sh
 # echo 'vizwiz'
@@ -16,8 +16,8 @@ echo 'gqa'
 # echo 'sqa'
 
 # # textqa
-# CUDA_VISIBLE_DEVICES=1 bash scripts/eval/textvqa.sh
-# echo 'textqa'
+CUDA_VISIBLE_DEVICES=1 bash scripts/eval/textvqa.sh
+echo 'textqa'
 
 # CUDA_VISIBLE_DEVICES=1 bash scripts/eval/pope.sh
 # echo 'pope' 

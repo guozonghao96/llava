@@ -14,6 +14,7 @@ except:
     from llava.train.llava_uhd.adapt_clip import adapt_build_vision_tower
     from llava.train.llava_uhd.vision_projector import build_vision_projector
 
+from transformers.generation.utils import GenerateOutput
 
 NEWLINE_TOKEN = 13
 DOT_TOKEN = 29892
@@ -98,6 +99,7 @@ class adapt_LlavaMetaForCausalLM(ABC):
         #         self.get_model().get_vision_tower()(images, origin_image_widths, 
         #                                             origin_image_heights, slice_image_widths, 
         #                                             slice_image_heights)
+        
         abs_image_features, slice_image_features, \
             abs_image_patch_sizes, slice_image_patch_sizes = self.get_model().get_vision_tower()(images, patch_images_list)
         assert len(abs_image_features) == len(slice_image_features) \
@@ -106,17 +108,21 @@ class adapt_LlavaMetaForCausalLM(ABC):
         # abstract_w_nums, abstract_h_nums = [w // 14 for w in origin_image_widths], [h // 14 for h in origin_image_heights]
         # slice_w_nums, slice_h_nums = [w // 14 for w in slice_image_widths], [h // 14 for h in slice_image_heights]
         # import pdb; pdb.set_trace()
-        
         image_features_list = []
         for abs_image_feature, slice_image_feature, abs_image_patch_size, slice_image_patch_size, ind_tokens in \
             zip(abs_image_features, slice_image_features, abs_image_patch_sizes, slice_image_patch_sizes, ind_tokens_list):
             abs_resampled_feature = self.get_model().mm_projector(abs_image_feature, tgt_size=abs_image_patch_size)
             slice_resampled_feature = self.get_model().mm_projector(slice_image_feature, tgt_size=slice_image_patch_size)
+            # print('after resampler but no select', abs_resampled_feature.shape, slice_resampled_feature.shape, len(ind_tokens))
+            # import pdb; pdb.set_trace()
             if len(ind_tokens) == 0: # 没有切片
                 resampled_image_features = torch.cat([slice_resampled_feature[0:0], abs_resampled_feature], dim=0)
-            else: # 有切片
-                resampled_image_features = torch.cat([slice_resampled_feature, abs_resampled_feature], dim=0)
+            else: # 有切片 # 由于padding了，所以需要只取前n个
+                resampled_image_features = torch.cat([slice_resampled_feature[:len(ind_tokens)], abs_resampled_feature], dim=0)
+            # print(torch.isnan(resampled_image_features).sum())
             image_features_list.append(resampled_image_features)
+            # print('resampler', resampled_image_features.shape)
+            # import pdb; pdb.set_trace()
         return image_features_list
 
         # if isinstance(image_features,list):
@@ -163,7 +169,7 @@ class adapt_LlavaMetaForCausalLM(ABC):
         # import pdb; pdb.set_trace()
         vision_tower = self.get_vision_tower()
         if vision_tower is None or images is None or input_ids.shape[1] == 1:
-            assert False
+            # assert False
             if past_key_values is not None and vision_tower is not None and images is not None and input_ids.shape[1] == 1:
                 target_shape = past_key_values[-1][-1].shape[-2] + 1
                 attention_mask = torch.cat((attention_mask, torch.ones(
@@ -215,7 +221,8 @@ class adapt_LlavaMetaForCausalLM(ABC):
             if num_images == 0:
                 cur_image_features = image_features[cur_image_idx]
                 cur_input_embeds_1 = self.get_model().embed_tokens(cur_input_ids)
-                cur_input_embeds = torch.cat([cur_input_embeds_1, cur_image_features[0:0]], dim=0)
+                # print(cur_input_embeds_1.shape, cur_image_features.shape,  cur_image_features[0:0].shape)
+                cur_input_embeds = torch.cat([cur_input_embeds_1, cur_image_features[0, 0:0]], dim=0)
                 new_input_embeds.append(cur_input_embeds)
                 new_labels.append(labels[batch_idx])
                 cur_image_idx += 1
@@ -255,10 +262,11 @@ class adapt_LlavaMetaForCausalLM(ABC):
                         cur_image_features = cur_abs_image_features
                     else:
                         # ind_token切片
+                        # print(self.get_model().embed_tokens.weight.requires_grad)
                         cur_ind_tokens_embeds = self.get_model().embed_tokens(
                                     torch.as_tensor(cur_ind_tokens,  # \n , -> 13, 1919
                                                     dtype=torch.long, 
-                                                    device=cur_image_features.device)).detach()
+                                                    device=cur_image_features.device))
                         # concat slice+ind tokens
                         temp_cur_image_features = []
                         for slice_image_features, ind_token_embeds in zip(cur_slice_image_features, cur_ind_tokens_embeds):
@@ -417,7 +425,7 @@ class adapt_LlavaMetaForCausalLM(ABC):
 
 #_____MY_DEBUG____belong to llava_llama.py
 class LlavaConfig(LlamaConfig):
-    model_type = "llava"
+    model_type = "llava_uhd"
 
 class adapt_LlavaLlamaModel(adapt_LlavaMetaModel, LlamaModel):
     config_class = LlavaConfig
@@ -501,15 +509,62 @@ class adapt_LlavaLlamaForCausalLM(LlamaForCausalLM, adapt_LlavaMetaForCausalLM):
             return_dict=return_dict
         )
 
+    @torch.no_grad()
+    def generate(
+        self,
+        inputs: Optional[torch.Tensor] = None,
+        images: Optional[torch.Tensor] = None,
+        image_sizes: Optional[torch.Tensor] = None,
+        patch_images_list: Optional[torch.Tensor] = None,
+        ind_tokens_list: Optional[torch.Tensor] = None,
+        **kwargs,
+    ) -> Union[GenerateOutput, torch.LongTensor]:
+        position_ids = kwargs.pop("position_ids", None)
+        attention_mask = kwargs.pop("attention_mask", None)
+        if "inputs_embeds" in kwargs:
+            raise NotImplementedError("`inputs_embeds` is not supported")
+
+        if images is not None:
+            (
+                inputs,
+                position_ids,
+                attention_mask,
+                _,
+                inputs_embeds,
+                _
+            ) = self.prepare_inputs_labels_for_multimodal(
+                inputs,
+                position_ids,
+                attention_mask,
+                None,
+                None,
+                images,
+                # image_sizes=image_sizes
+                patch_images_list,
+                ind_tokens_list
+            )
+        else:
+            inputs_embeds = self.get_model().embed_tokens(inputs)
+
+        return super().generate(
+            position_ids=position_ids,
+            attention_mask=attention_mask,
+            inputs_embeds=inputs_embeds,
+            **kwargs
+        )
+
     def prepare_inputs_for_generation(self, input_ids, past_key_values=None, inputs_embeds=None, **kwargs):
         images = kwargs.pop("images", None)
         image_sizes = kwargs.pop("image_sizes", None)
-        origin_image_widths = kwargs.pop("origin_image_widths", None)
-        origin_image_heights = kwargs.pop("origin_image_heights", None)
-        slice_image_widths = kwargs.pop("slice_image_widths", None)
-        slice_image_heights = kwargs.pop("slice_image_heights", None)
-        num_images_list = kwargs.pop("num_images_list", None)
-        ind_tokens = kwargs.pop("ind_tokens", None)
+        # origin_image_widths = kwargs.pop("origin_image_widths", None)
+        # origin_image_heights = kwargs.pop("origin_image_heights", None)
+        # slice_image_widths = kwargs.pop("slice_image_widths", None)
+        # slice_image_heights = kwargs.pop("slice_image_heights", None)
+        # num_images_list = kwargs.pop("num_images_list", None)
+        ind_tokens_list = kwargs.pop("ind_tokens_list", None)
+        patch_images_list = kwargs.pop("patch_images_list", None)
+        # print(inputs_embeds.shape)
+        # import pdb; pdb.set_trace()
         _inputs = super().prepare_inputs_for_generation(
             input_ids, past_key_values=past_key_values, inputs_embeds=inputs_embeds, **kwargs
         )
@@ -517,19 +572,21 @@ class adapt_LlavaLlamaForCausalLM(LlamaForCausalLM, adapt_LlavaMetaForCausalLM):
             _inputs['images'] = images
         if image_sizes is not None:
             _inputs['image_sizes'] = image_sizes
-        if origin_image_widths is not None:
-            _inputs['origin_image_widths'] = origin_image_widths
-        if origin_image_heights is not None:
-            _inputs['origin_image_heights'] = origin_image_heights
-        if slice_image_widths is not None:
-            _inputs['slice_image_widths'] = slice_image_widths
-        if slice_image_heights is not None:
-            _inputs['slice_image_heights'] = slice_image_heights
-        if num_images_list is not None:
-            _inputs['num_images_list'] = num_images_list
-        if ind_tokens is not None:
-            _inputs['ind_tokens'] = ind_tokens
+        # if origin_image_widths is not None:
+        #     _inputs['origin_image_widths'] = origin_image_widths
+        # if origin_image_heights is not None:
+        #     _inputs['origin_image_heights'] = origin_image_heights
+        # if slice_image_widths is not None:
+        #     _inputs['slice_image_widths'] = slice_image_widths
+        # if slice_image_heights is not None:
+        #     _inputs['slice_image_heights'] = slice_image_heights
+        # if num_images_list is not None:
+        #     _inputs['num_images_list'] = num_images_list
+        if ind_tokens_list is not None:
+            _inputs['ind_tokens_list'] = ind_tokens_list
+        if patch_images_list is not None:
+            _inputs['patch_images_list'] = patch_images_list
         return _inputs
 
-AutoConfig.register("llava", LlavaConfig)
+AutoConfig.register("llava_uhd", LlavaConfig)
 AutoModelForCausalLM.register(LlavaConfig, adapt_LlavaLlamaForCausalLM)

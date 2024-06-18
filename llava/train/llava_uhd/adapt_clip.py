@@ -337,6 +337,17 @@ class adapt_CLIPVisionTower(nn.Module):
             abs_image_features.append(image_feature)
             abs_image_patch_sizes.append((patch_h, patch_w))
         
+        # # padding patches image_tensors
+        # patch_images_list_temp = []
+        # max_of_input = 7
+        # for patches in patch_images_list:
+        #     patches = patches.to(device=self.device, dtype=self.dtype) # n,3,h,w
+        #     num_valid = patches.shape[0]
+        #     padding_tensor = torch.zeros_like(patches[0]).unsqueeze(0).repeat(max_of_input - num_valid, 1, 1, 1) # max-n, 3, h, w
+        #     patches = torch.cat([patches, padding_tensor], dim=0)
+        #     patch_images_list_temp.append(patches)
+        # patch_images_list = patch_images_list_temp
+        
         # slice feature
         slice_image_features = []
         slice_image_patch_sizes = []

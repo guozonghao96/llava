@@ -14,14 +14,13 @@ from torch.utils.data import Dataset, DataLoader
 from PIL import Image
 import math
 
-from llava.train.llava_uhd.slice_logic import process_image as uhd_process_images
+from llava.train.llava_uhd.slice_logic import process_image as uhd_process_images, slice_image_minicpm
 from llava.train.llava_uhd.builder import load_pretrained_model
 
 def split_list(lst, n):
     """Split a list into n (roughly) equal-sized chunks"""
     chunk_size = math.ceil(len(lst) / n)  # integer division
     return [lst[i:i+chunk_size] for i in range(0, len(lst), chunk_size)]
-
 
 def get_chunk(lst, n, k):
     chunks = split_list(lst, n)
@@ -51,32 +50,38 @@ class CustomDataset(Dataset):
         conv.append_message(conv.roles[1], None)
         prompt = conv.get_prompt()
 
+        processor = self.image_processor
+        crop_size = processor.crop_size
         image = Image.open(os.path.join(self.image_folder, image_file)).convert('RGB')
-        
-        
-        # process image
-        origin_image_width  = image.size[0]
-        origin_image_height = image.size[1]
-        slices_and_image, ind_tokens = uhd_process_images(image)
-        image_tuple = tuple(slices_and_image)
-        image_tensor = torch.cat(image_tuple, dim=0)
-        num_images = image_tensor.shape[0] // 3
-        # process image
-        
+        source_image, patches, best_grid, ind_tokens = slice_image_minicpm(
+            image, max_slice_nums=7, scale_resolution=336, patch_size=14, never_split=False)
+
+        if best_grid is None: #说明没有切片
+            patch_tensors = torch.zeros(1, 3, crop_size['height'], crop_size['width'])
+            source_tensors = processor.preprocess(source_image, do_resize=False, do_center_crop=False, 
+                                                    do_rescale=True, do_normalize=True, 
+                                                    return_tensors='pt')['pixel_values'] # 1, 3, abs_h, abs_w
+        else:
+            patch_tensors = processor.preprocess(patches, do_resize=False, do_center_crop=False, 
+                                                    do_rescale=True, do_normalize=True, 
+                                                    return_tensors='pt')['pixel_values'] # num_slice, 3, s_h, s_w
+            source_tensors = processor.preprocess(source_image, do_resize=False, do_center_crop=False, 
+                                                    do_rescale=True, do_normalize=True, 
+                                                    return_tensors='pt')['pixel_values'] # 1, 3, abs_h, abs_w
+        image_tensor = source_tensors[0]
         input_ids = tokenizer_image_token(prompt, self.tokenizer, IMAGE_TOKEN_INDEX, return_tensors='pt')
 
-        return input_ids, image_tensor, image.size, ind_tokens, origin_image_width, origin_image_height, num_images
+        return input_ids, image_tensor, image.size, ind_tokens, patch_tensors
 
     def __len__(self):
         return len(self.questions)
 
 
 def collate_fn(batch):
-    input_ids, image_tensors, image_sizes, \
-        ind_tokens, origin_image_width, origin_image_height, num_images = zip(*batch)
+    input_ids, image_tensors, image_sizes, ind_tokens, patch_tensors = zip(*batch)
     input_ids = torch.stack(input_ids, dim=0)
-    image_tensors = torch.stack(image_tensors, dim=0)
-    return input_ids, image_tensors, image_sizes, ind_tokens, origin_image_width, origin_image_height, num_images
+    # image_tensors = torch.stack(image_tensors, dim=0)
+    return input_ids, image_tensors, image_sizes, ind_tokens, patch_tensors
 
 # DataLoader
 def create_data_loader(questions, image_folder, tokenizer, image_processor, model_config, batch_size=1, num_workers=4):
@@ -84,7 +89,6 @@ def create_data_loader(questions, image_folder, tokenizer, image_processor, mode
     dataset = CustomDataset(questions, image_folder, tokenizer, image_processor, model_config)
     data_loader = DataLoader(dataset, batch_size=batch_size, num_workers=num_workers, shuffle=False, collate_fn=collate_fn)
     return data_loader
-
 
 def eval_model(args):
     # Model
@@ -105,34 +109,36 @@ def eval_model(args):
 
     data_loader = create_data_loader(questions, args.image_folder, tokenizer, image_processor, model.config)
 
-    for (input_ids, image_tensor, image_sizes, ind_tokens, \
-            origin_image_widths, origin_image_heights, num_images), line in tqdm(zip(data_loader, questions), total=len(questions)):
+    for (input_ids, image_tensor, image_sizes, ind_tokens_list, patch_images_list), line in tqdm(zip(data_loader, questions), total=len(questions)):
         idx = line["question_id"]
         cur_prompt = line["text"]
         input_ids = input_ids.to(device='cuda', non_blocking=True)
-
+        image_tensor = [item.to(dtype=torch.bfloat16, device='cuda', non_blocking=True) for item in image_tensor]
+        patch_images_list = [item.to(dtype=torch.bfloat16, device='cuda', non_blocking=True) for item in patch_images_list]
         with torch.inference_mode():
             output_ids = model.generate(
                 input_ids,
-                images=image_tensor.to(dtype=torch.bfloat16, device='cuda', non_blocking=True),
+                images=image_tensor,
                 image_sizes=image_sizes,
                 do_sample=True if args.temperature > 0 else False,
                 temperature=args.temperature,
                 top_p=args.top_p,
                 num_beams=args.num_beams,
                 max_new_tokens=args.max_new_tokens,
-                origin_image_widths=origin_image_widths,
-                origin_image_heights=origin_image_heights,
-                num_images_list=num_images,
-                ind_tokens=ind_tokens,
+                ind_tokens_list=ind_tokens_list,
+                patch_images_list=patch_images_list,
                 use_cache=True)
 
-        input_token_len = input_ids.shape[1]
-        n_diff_input_output = (input_ids != output_ids[:, :input_token_len]).sum().item()
-        if n_diff_input_output > 0:
-            print(f'[Warning] {n_diff_input_output} output_ids are not the same as the input_ids')
-        outputs = tokenizer.batch_decode(output_ids[:, input_token_len:], skip_special_tokens=True)[0]
+        # old version of eval
+        # input_token_len = input_ids.shape[1]
+        # n_diff_input_output = (input_ids != output_ids[:, :input_token_len]).sum().item()
+        # if n_diff_input_output > 0:
+        #     print(f'[Warning] {n_diff_input_output} output_ids are not the same as the input_ids')
+        # outputs = tokenizer.batch_decode(output_ids[:, input_token_len:], skip_special_tokens=True)[0]
+        # new version of eval
 
+        # print(output_ids)
+        outputs = tokenizer.batch_decode(output_ids, skip_special_tokens=True)[0].strip()
         ans_id = shortuuid.uuid()
         ans_file.write(json.dumps({"question_id": idx,
                                    "prompt": cur_prompt,

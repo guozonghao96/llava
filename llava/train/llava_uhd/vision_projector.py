@@ -42,7 +42,7 @@ def build_vision_projector(config, delay_load=False, **kwargs):
     resampler = Resampler(
         grid_size=grid_size,
         embed_dim = 5120,  # 保持与视觉模型输出的 embed_dim 一致
-        num_heads = 1024 // 128,  # 保持与视觉模型输出的 num_heads 一致
+        num_heads = 5120 // 128,  # 保持与视觉模型输出的 num_heads 一致
         kv_dim=1024,  # 保持与视觉模型输出的 kv_dim 一致
     )
     
